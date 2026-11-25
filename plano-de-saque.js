@@ -656,7 +656,7 @@
 
   const simplify = value => value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
   const dailyTitle = /recursos\s+(?:saqueados|pilhados)\s*\(?hoje/;
-  function rankingEntries(page = document, source = location.href) {
+  function rankingEntries(page = document, source = location.href, today = rankingDate()) {
     const sourceUrl = new URL(source, location.href);
     const knownDaily = sourceUrl.searchParams.get("mode") === "in_a_day" && sourceUrl.searchParams.get("type") === "loot_res";
     if (!demo && sourceUrl.searchParams.get("screen") !== "ranking") return [];
@@ -672,6 +672,9 @@
       const heading = [...table.rows].find(row => [...row.cells].some(isDailyColumn));
       if (!knownDaily && (!heading || [...heading.cells].some(cell => cell.colSpan !== 1))) continue;
       const index = heading ? [...heading.cells].findIndex(isDailyColumn) : 3;
+      const header = [...table.rows].find(row => [...row.cells].some(cell => cell.tagName === "TH"));
+      const dateIndex = header ? [...header.cells].findIndex(cell => /^(data|date|dia)$/.test(simplify(cell.textContent.trim()))) : -1;
+      const yesterday = new Date(Date.parse(today) - day).toISOString().slice(0,10);
       for (const row of table.rows) {
         const link = row.querySelector('a[href*="screen=info_player"]');
         const cell = row.cells[index];
@@ -682,7 +685,15 @@
         const raw = cell.textContent.trim();
         if (url.origin !== location.origin || !/^\d+$/.test(id ?? "") || !name || !/^\d[\d.,\s]*$/.test(raw)) continue;
         const total = Number(raw.replace(/\D/g, ""));
-        if (Number.isSafeInteger(total)) entries.set(id, {id, name, total});
+        const label = simplify(row.cells[dateIndex]?.textContent.trim() ?? "");
+        const absolute = label.match(/^(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{4})$/);
+        const date = dateIndex < 0 || /^(hoje|today)$/.test(label) ? today :
+          /^(ontem|yesterday)$/.test(label) ? yesterday :
+          absolute ? [absolute[3],absolute[2].padStart(2,"0"),absolute[1].padStart(2,"0")].join("-") : null;
+        if (date && date <= today && Number.isFinite(Date.parse(date)) && Number.isSafeInteger(total)) {
+          const key = id + "/" + date;
+          if (!entries.has(key) || entries.get(key).total < total) entries.set(key,{id,name,total,date});
+        }
       }
     }
     return [...entries.values()];
@@ -866,7 +877,14 @@
   }
 
   async function captureRanking(date) {
-    const entries = new Map(rankingEntries().map(entry => [entry.id, entry]));
+    const entries = new Map();
+    function collect(rows) {
+      for (const entry of rows) {
+        const key = entry.id + "/" + entry.date;
+        if (!entries.has(key) || entries.get(key).total < entry.total) entries.set(key,entry);
+      }
+    }
+    collect(rankingEntries(document,location.href,date));
     if (!demo) {
       let url = gameUrl("ranking", {mode:"in_a_day", type:"loot_res"});
       const visited = new Set();
@@ -878,7 +896,7 @@
           throw Error("Classificação indisponível (HTTP " + response.status + ").");
         }
         const page = new DOMParser().parseFromString(await response.text(), "text/html");
-        for (const entry of rankingEntries(page, response.url)) entries.set(entry.id, entry);
+        collect(rankingEntries(page,response.url,date));
         const pageIndex = link => Number(link.searchParams.get("page") ?? link.searchParams.get("offset") ?? 0);
         const next = [...page.querySelectorAll('a[href*="in_a_day"]')].map(link => new URL(link.getAttribute("href"), url))
           .filter(link => link.origin === location.origin && link.searchParams.get("screen") === "ranking" &&
@@ -890,8 +908,15 @@
     }
     if (!entries.size) throw Error("Nenhum total diário reconhecido na classificação.");
     if (date !== rankingDate()) throw Error("Mudou o dia no servidor. Repete o scan.");
-    saveRanking(mergeRanking(readRanking(), [...entries.values()], date, Date.now()));
-    return entries.size;
+    let history = readRanking();
+    const grouped = Map.groupBy(entries.values(), entry => entry.date);
+    const at = Date.now();
+    for (const [entryDate, records] of grouped) {
+      const fresh = entryDate === date ? records : records.filter(entry => (history[entry.id]?.days?.[entryDate]?.total ?? -1) < entry.total);
+      history = mergeRanking(history,fresh,entryDate,at);
+    }
+    saveRanking(history);
+    return {today:grouped.get(date)?.length ?? 0, total:entries.size};
   }
 
   function selectView(name) {
@@ -908,7 +933,7 @@
     const date = rankingDate();
     try {
       const [map, ranking] = await Promise.allSettled([game ? refreshNearby() : Promise.resolve(readNearby()), captureRanking(date)]);
-      if (ranking.status === "fulfilled") rankStatus(quantity(ranking.value,"jogador lido","jogadores lidos") + " na classificação · " + date);
+      if (ranking.status === "fulfilled") rankStatus(quantity(ranking.value.total,"registo com data","registos com data") + " na classificação · " + date);
       else rankStatus(ranking.reason.message);
       renderNative();
       renderRanking();
@@ -916,7 +941,7 @@
       queueMapMarkers();
       const details = [];
       if (map.status === "fulfilled" && map.value) details.push(quantity(Object.keys(map.value.players).length,"vizinho","vizinhos"));
-      if (ranking.status === "fulfilled") details.push(quantity(ranking.value,"total diário","totais diários"));
+      if (ranking.status === "fulfilled") details.push(quantity(ranking.value.today,"total de hoje","totais de hoje"));
       if (map.status === "rejected") details.push("Mapa: " + map.reason.message);
       if (ranking.status === "rejected") details.push("Classificação: " + ranking.reason.message);
       $("scan-status").textContent = details.join(" · ");
