@@ -285,6 +285,7 @@
   const key = "plano-de-saque:v1:" + location.hostname + ":" + (window.game_data?.player?.id ?? "local");
   const rankingKey = "plano-de-saque:ranking:v1:" + location.hostname;
   const mapKey = key + ":map";
+  const scoutKey = key + ":scout";
   const self = String(window.game_data?.player?.id ?? "");
   const blank = () => ({zone:"Europe/Lisbon", origins:[], templates:[], targets:[], reports:[], activity:[], commands:[]});
   function sample(now) {
@@ -391,6 +392,8 @@
     .map-key{font-size:12px;color:#55371d}
     #native-list td:last-child{white-space:nowrap}
     #native-list button{margin-right:5px;padding:3px 9px}
+    #native-list .resource{font-weight:700;color:#563820}
+    .launcher{right:auto;left:16px;bottom:35px}
     button.launch{background:#694129}
     #map-layer{position:fixed;inset:0;z-index:110;pointer-events:none}
     .village-mark{position:absolute;transform:translate(-50%,-95%);padding:0 3px;
@@ -409,7 +412,7 @@
       <section data-pane="farm">
         <p class="status" id="farm-status"></p>
         <p><a id="open-farm">Abrir Assistente de Saque</a></p>
-        <div class="table"><table><thead><tr><th>Aldeia</th><th>Distância</th><th>Saque no Assistente</th></tr></thead><tbody id="native-list"></tbody></table></div>
+        <div class="table"><table><thead><tr><th>Aldeia</th><th>Distância</th><th>Saque estimado</th><th>Enviar</th></tr></thead><tbody id="native-list"></tbody></table></div>
       </section>
       <section data-pane="advanced" hidden>
       <p class="status" id="status" role="status"></p>
@@ -590,13 +593,67 @@
   }
 
   const screen = new URLSearchParams(location.search).get("screen");
-  const dispatched = new WeakSet();
+  const dispatched = new WeakMap();
   function gameUrl(nextScreen, parameters = {}) {
     const url = new URL("/game.php", location.href);
     const current = new URLSearchParams(location.search);
     for (const key of ["village","t"]) if (current.has(key)) url.searchParams.set(key, current.get(key));
     for (const [key, value] of Object.entries({screen:nextScreen, ...parameters})) url.searchParams.set(key, value);
     return url;
+  }
+
+  function readScouts() {
+    try { return JSON.parse(localStorage.getItem(scoutKey) ?? "{}"); }
+    catch { return {}; }
+  }
+
+  function readFarmResources(row) {
+    const village = row.querySelector('a[href*="screen=report"][href*="view="]')?.closest("td");
+    const dateCell = village?.nextElementSibling;
+    const resources = dateCell?.nextElementSibling;
+    if (!resources || !dateCell.textContent.trim()) return null;
+    const resourceSpans = [...resources.querySelectorAll(".res")];
+    const tokens = resourceSpans.length === 3 ? resourceSpans.map(span => span.textContent.trim()) : resources.textContent.trim().split(/\s+/);
+    const values = tokens.map(value => /^\d[\d.]*$/.test(value) ? Number(value.replaceAll(".","")) : NaN);
+    if (values.length !== 3 || !values.every(Number.isSafeInteger)) return null;
+    return {total:sum(values), label:dateCell.textContent.trim(), date:rankingDate()};
+  }
+
+  function collectScouts(farm) {
+    const scouts = readScouts();
+    let changed = false;
+    for (const row of farm?.querySelectorAll("tr") ?? []) {
+      const coord = row.textContent.match(/\b\d{1,3}\|\d{1,3}\b/)?.[0];
+      if (!coord) continue;
+      const sample = readFarmResources(row);
+      if (sample && JSON.stringify(sample) !== JSON.stringify(scouts[coord])) {
+        scouts[coord] = sample;
+        changed = true;
+      }
+    }
+    if (changed) {
+      try { localStorage.setItem(scoutKey,JSON.stringify(scouts)); }
+      catch { /* Observations are still available for this rendering. */ }
+    }
+    return scouts;
+  }
+
+  async function refreshScouts() {
+    if (!game || screen === "am_farm") return;
+    const response = await fetch(gameUrl("am_farm"),{credentials:"same-origin",signal:AbortSignal.timeout(9000)});
+    if (!response.ok) throw Error("Assistente indisponível.");
+    const page = new DOMParser().parseFromString(await response.text(),"text/html");
+    collectScouts(page.querySelector("#plunder_list, #plunder_list_table"));
+  }
+
+  function readFarmCapacity() {
+    const panel = document.querySelector("#content_value");
+    if (!panel) return {};
+    const capacities = [...panel.querySelectorAll("tr")]
+      .filter(row => row.querySelectorAll('input[type="text"],input[type="number"],input:not([type])').length >= 6 &&
+        row.querySelector("select") && /^\d[\d.\s]*$/.test(row.cells[row.cells.length - 1]?.textContent.trim() ?? ""))
+      .map(row => Number(row.cells[row.cells.length - 1].textContent.replace(/\D/g,"")));
+    return capacities.length === 2 ? {a:capacities[0],b:capacities[1]} : {};
   }
 
   function renderNative() {
@@ -606,16 +663,20 @@
     const map = readNearby();
     const targets = new Map(Object.entries(map?.villages ?? {}).filter(([,v]) => v.owner === "0" && v.distance <= map.radius));
     const nativeRows = new Map();
+    const scouts = collectScouts(farm);
+    const capacities = readFarmCapacity();
     for (const row of farm?.querySelectorAll("tr") ?? []) {
       if (!row.getClientRects().length) continue;
       const coord = row.textContent.match(/\b\d{1,3}\|\d{1,3}\b/)?.[0];
-      if (coord && (!map || map.villages[coord]?.owner === "0")) nativeRows.set(coord, row);
+      if (!coord || (map?.villages[coord] && map.villages[coord].owner !== "0")) continue;
+      nativeRows.set(coord, row);
     }
     for (const coord of nativeRows.keys()) if (!targets.has(coord)) targets.set(coord, {name:"Alvo do Assistente"});
     const ordered = [...targets].sort(([a,av],[b,bv]) => Number(nativeRows.has(b)) - Number(nativeRows.has(a)) ||
       (av.distance ?? Infinity) - (bv.distance ?? Infinity));
     for (const [coord, target] of ordered) {
       const row = nativeRows.get(coord);
+      const sample = scouts[coord];
       const buttons = [];
       for (const model of ["a","b"]) {
         const native = row?.querySelector(".farm_icon_" + model);
@@ -624,12 +685,12 @@
         const button = document.createElement("button");
         button.textContent = "Enviar " + model.toUpperCase();
         const unavailable = () => !control.isConnected || !control.getClientRects().length ||
-          dispatched.has(control) || control.matches(":disabled,.disabled,[aria-disabled=true]") ||
+          (dispatched.get(control) ?? 0) > Date.now() || control.matches(":disabled,.disabled,[aria-disabled=true]") ||
           !!native.closest(".farm_icon_disabled,.disabled,[aria-disabled=true]");
         button.disabled = unavailable();
         button.onclick = () => {
           if (unavailable()) return;
-          dispatched.add(control);
+          dispatched.set(control, Date.now() + 3500);
           button.disabled = true;
           dialog.close();
           control.click();
@@ -643,14 +704,34 @@
       if (target.id && game) title.href = String(gameUrl("info_village",{id:target.id}));
       label.append(title);
       line.insertCell().textContent = Number.isFinite(target.distance) ? target.distance.toFixed(1).replace(".",",") : "—";
+      const resources = line.insertCell();
+      resources.className = "resource";
+      const log = document.createElement("small");
+      if (sample) {
+        resources.textContent = "≈ " + format.format(sample.total);
+        const modelEstimates = buttons.length ? Object.entries(capacities).filter(([,capacity]) => capacity > 0)
+          .map(([model,capacity]) => model.toUpperCase() + " até " + format.format(Math.min(sample.total,capacity))) : [];
+        log.textContent = ["Reconhecimento " + (sample.date === rankingDate() ? sample.label : sample.date), ...modelEstimates].join(" · ");
+      } else {
+        const observations = recent(state.reports.filter(report => report.target === coord), Date.now());
+        resources.textContent = observations.length ? "≈ " + format.format(sum(observations.map(report => report.loot)) / observations.length) : "Sem estimativa";
+        if (observations.length) log.textContent = "Média dos relatórios importados";
+      }
+      if (log.textContent) resources.append(log);
       const actions = line.insertCell();
       if (buttons.length) actions.append(...buttons);
-      else actions.textContent = "Sem botão disponível";
+      else if (target.id && game) {
+        const prepare = document.createElement("a");
+        prepare.href = String(gameUrl("place",{target:target.id}));
+        prepare.textContent = "Preparar ataque";
+        actions.append(prepare);
+      } else actions.textContent = "Sem modelo disponível";
     }
     $("open-farm").hidden = !!farm || !game;
     $("open-farm").href = String(gameUrl("am_farm"));
     $("farm-status").textContent = ordered.length
-      ? quantity(ordered.length,"aldeia na lista","aldeias na lista") + " · " + quantity(nativeRows.size,"visível no Assistente","visíveis no Assistente")
+      ? quantity(ordered.length,"aldeia na lista","aldeias na lista") + " · " + quantity(nativeRows.size,"visível no Assistente","visíveis no Assistente") +
+        (farm ? " · A/B usa as tropas da aldeia atual." : " · Abre o Assistente para usar os modelos A/B.")
       : "Clica em «Scan completo» para procurar aldeias bárbaras.";
   }
 
@@ -849,7 +930,7 @@
       row.insertCell().textContent = neighbor ? neighbor.distance.toFixed(1).replace(".", ",") + " campos" : "—";
       const todayCell = row.insertCell();
       const reading = player.days[today];
-      todayCell.textContent = reading ? format.format(reading.total) : "Sem leitura";
+      todayCell.textContent = reading ? format.format(reading.total) : "Sem valor publicado";
       if (reading?.increasedAt) {
         const observed = document.createElement("small");
         observed.textContent = "Aumento observado às " + clock(reading.increasedAt, state.zone ?? "Europe/Lisbon");
@@ -932,8 +1013,11 @@
     $("scan-status").textContent = "A ler aldeias e classificação…";
     const date = rankingDate();
     try {
-      const [map, ranking] = await Promise.allSettled([game ? refreshNearby() : Promise.resolve(readNearby()), captureRanking(date)]);
-      if (ranking.status === "fulfilled") rankStatus(quantity(ranking.value.total,"registo com data","registos com data") + " na classificação · " + date);
+      const [map, ranking, scouting] = await Promise.allSettled([
+        game ? refreshNearby() : Promise.resolve(readNearby()), captureRanking(date), refreshScouts()
+      ]);
+      if (ranking.status === "fulfilled") rankStatus(quantity(ranking.value.total,"registo com data","registos com data") + " na classificação · " +
+        (ranking.value.today ? date : "a tabela consultada ainda não publicou valores de hoje"));
       else rankStatus(ranking.reason.message);
       renderNative();
       renderRanking();
@@ -944,6 +1028,7 @@
       if (ranking.status === "fulfilled") details.push(quantity(ranking.value.today,"total de hoje","totais de hoje"));
       if (map.status === "rejected") details.push("Mapa: " + map.reason.message);
       if (ranking.status === "rejected") details.push("Classificação: " + ranking.reason.message);
+      if (scouting.status === "rejected") details.push("Reconhecimento: " + scouting.reason.message);
       $("scan-status").textContent = details.join(" · ");
     } finally {
       button.disabled = false;
