@@ -218,14 +218,14 @@
     const villages = [];
     const nearest = new Map();
     let validVillages = 0;
-    for (const [id,,x,y,owner] of mapRows(villageText)) {
+    for (const [id,mapName,x,y,owner] of mapRows(villageText)) {
       if (!/^\d{1,3}$/.test(x) || !/^\d{1,3}$/.test(y) || !/^\d+$/.test(owner)) continue;
       validVillages++;
       const coord = Number(x) + "|" + Number(y);
       const gap = Math.min(...anchors.map(base => distance(base, coord)));
       if (gap > radius + 8) continue;
       const old = previous?.villages?.[coord];
-      villages.push([coord, {id, owner, changedAt:old?.owner === owner ? old.changedAt : old ? at : 0}]);
+      villages.push([coord, {id, owner, name:decodeMapName(mapName), distance:gap, changedAt:old?.owner === owner ? old.changedAt : old ? at : 0}]);
       if (owner !== "0" && owner !== self && gap <= radius) {
         nearest.set(owner, Math.min(gap, nearest.get(owner) ?? Infinity));
       }
@@ -333,8 +333,8 @@
       border:1px solid #b9aa86;border-radius:12px;color:#272a21;background:#f7f2e6;
       box-shadow:0 22px 100px #101e17aa;font:15px/1.45 system-ui,sans-serif}
     dialog::backdrop{background:#102217a6}
-    .top{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:18px 26px;background:#183722;color:#fcf4df}
-    h1{font:700 clamp(28px,4vw,49px)/1 Georgia,serif;margin:0;letter-spacing:-.035em}
+    .top{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:13px 18px;background:#542b1c;color:#fff1cf;border-bottom:3px solid #ad7845}
+    h1{font:700 clamp(23px,4vw,34px)/1 Georgia,serif;margin:0}
     .actions,.controls,.formrow{display:flex;flex-wrap:wrap;align-items:center;gap:12px}
     .page{padding:18px;display:grid;gap:14px}
     .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
@@ -374,13 +374,44 @@
     #rank-rows details{background:transparent;border:0}
     #rank-rows summary{background:transparent;color:#173923;font:inherit;font-weight:650;padding:0}
     #rank-rows details div{padding:3px 0 0 16px;color:#5c5c47}
+    dialog{width:min(1050px,calc(100vw - 24px));background:#f4e4be;color:#432a19;border:2px solid #805434;border-radius:5px;font:14px/1.4 system-ui,sans-serif}
+    dialog::backdrop{background:#29150c99}
+    [hidden]{display:none!important}
+    .scanner{display:flex;align-items:center;flex-wrap:wrap;gap:9px;padding:10px;background:#e6c891;border:1px solid #b58b56}
+    .scanner button{background:#7a3426;color:#fff1cf;border-color:#623124}
+    .scanner button:disabled{opacity:.65;cursor:wait}
+    a{color:#693322;text-underline-offset:2px}
+    .tabs{display:flex;gap:4px;border-bottom:1px solid #a67948}
+    .tabs button{background:#efe0bd;border-radius:4px 4px 0 0}
+    .tabs button[aria-pressed=true]{background:#694129;color:#fff1d2}
+    th,summary{background:#775035;color:#fff1d2}
+    .table{border-color:#b58b56;border-radius:4px}
+    tbody tr:nth-child(even){background:#ead5a9}
+    tbody tr:hover{background:#e8c589}
+    .map-key{font-size:12px;color:#55371d}
+    #native-list td:last-child{white-space:nowrap}
+    #native-list button{margin-right:5px;padding:3px 9px}
+    button.launch{background:#694129}
+    #map-layer{position:fixed;inset:0;z-index:110;pointer-events:none}
+    .village-mark{position:absolute;transform:translate(-50%,-95%);padding:0 3px;
+      border:1px solid #805434;border-radius:3px;background:#fff2ce;color:#4c2815;
+      white-space:nowrap;font:700 10px/14px system-ui,sans-serif;box-shadow:0 1px 2px #39231055}
+    .village-mark.recent{border-color:#467035;color:#294f23}
     @media(max-width:660px){dialog{width:calc(100vw - 12px);max-height:calc(100dvh - 12px)}.top,.page{padding:12px}.stats{gap:6px}.stat{padding:8px}.stat span{font-size:14px}.stat strong{font-size:24px}.stat small{display:block;margin:0}.controls{display:grid}.primary{margin:0}.top button{font-size:12px}.formrow{align-items:stretch}}
   `;
   const dialog = document.createElement("dialog");
   dialog.setAttribute("aria-labelledby", "title");
   dialog.innerHTML = `
-    <header class="top"><h1 id="title">Plano de saque</h1><div class="actions"><button id="data">Dados</button><button id="close">Fechar</button></div></header>
+    <header class="top"><h1 id="title">Plano de saque</h1><div class="actions"><button id="close">Fechar</button></div></header>
     <main class="page">
+      <div class="scanner"><button id="scan">Scan completo</button><label>Raio <select id="radius"><option>5</option><option selected>10</option><option>15</option><option>20</option></select> campos</label><span id="scan-status" role="status"></span></div>
+      <nav class="tabs" aria-label="Vistas do painel"><button data-view="farm">Bárbaras</button><button data-view="neighbors">Vizinhos</button><button data-view="advanced">Avançado</button></nav>
+      <section data-pane="farm">
+        <p class="status" id="farm-status"></p>
+        <p><a id="open-farm">Abrir Assistente de Saque</a></p>
+        <div class="table"><table><thead><tr><th>Aldeia</th><th>Distância</th><th>Saque no Assistente</th></tr></thead><tbody id="native-list"></tbody></table></div>
+      </section>
+      <section data-pane="advanced" hidden>
       <p class="status" id="status" role="status"></p>
       <section class="stats" aria-label="Resumo da sessão">
         <div class="stat"><span>Saque previsto</span><strong id="total">—</strong><small>recursos</small></div>
@@ -394,35 +425,39 @@
         <label><input type="checkbox" id="explore" checked> Explorar</label>
         <button class="primary">Gerar plano</button>
       </form>
-      <details id="native" hidden><summary>Enviar pelo Assistente</summary><div class="inside" id="native-list"></div></details>
       <div class="table"><table>
         <thead><tr><th><button data-sort="target">Alvo ↕</button></th><th>Origem</th><th>Modelo</th><th><button data-sort="start">Enviar ↕</button></th><th>Chegada / Regresso</th><th><button data-sort="loot">Saque previsto ↕</button></th><th>Motivo</th></tr></thead>
         <tbody id="plan"></tbody>
       </table></div>
       <details id="intel"><summary>Informação de jogadores</summary><div class="inside" id="player-list"></div></details>
-      <details id="daily"><summary>Recursos saqueados hoje</summary><div class="inside">
-        <div class="formrow"><button id="scan">Guardar classificação visível</button><button id="export-ranking">Exportar histórico</button><label><input id="tracked-only" type="checkbox" checked> Só acompanhados</label></div>
-        <div class="formrow"><label>Raio <select id="radius"><option>5</option><option selected>10</option><option>15</option><option>20</option></select> campos</label><button id="refresh-map">Atualizar vizinhos pelo mapa</button></div>
-        <p id="map-status" role="status"></p>
-        <p id="rank-status" role="status">Abre «Recursos saqueados hoje» e guarda os jogadores visíveis.</p>
-        <div class="table"><table><thead><tr><th>Jogador</th><th>Distância</th><th>Saque hoje</th><th>Último dia anterior</th><th>Sinal no mapa</th><th>Acompanhar</th></tr></thead><tbody id="rank-rows"></tbody></table></div>
-      </div></details>
       <details id="inputs"><summary>Importação de dados</summary><div class="inside">
         <p>Importa um ficheiro JSON ou edita os dados no campo abaixo. Guarda para recalcular.</p>
         <div class="formrow"><button id="capture">Ler alvos visíveis</button><button id="example">Ver exemplo</button><button id="export">Exportar dados</button><label>Importar JSON <input id="file" type="file" accept=".json,application/json"></label></div>
         <textarea id="json" aria-label="Dados do plano em JSON" spellcheck="false"></textarea>
         <div class="formrow"><button id="save" class="primary">Guardar dados</button></div>
       </div></details>
+      </section>
+      <section data-pane="neighbors" hidden>
+        <div class="formrow"><button id="export-ranking">Exportar histórico</button><label><input id="tracked-only" type="checkbox" checked> Só vizinhos e acompanhados</label><label id="map-option"><input id="show-map" type="checkbox" checked> Marcadores no mapa</label></div>
+        <p id="map-status" role="status"></p>
+        <p id="rank-status" role="status"></p>
+        <p class="map-key">● Sinal recente · ◇ Saque registado hoje · ? Sem sinal recente</p>
+        <div class="table"><table><thead><tr><th>Jogador</th><th>Distância</th><th>Saque hoje</th><th>Dia anterior</th><th>Atividade</th><th>Acompanhar</th></tr></thead><tbody id="rank-rows"></tbody></table></div>
+      </section>
     </main>`;
 
   const $ = id => root.getElementById(id);
+  const quantity = (count, singular, plural) => format.format(count) + " " + (count === 1 ? singular : plural);
   const launch = document.createElement("button");
   launch.className = "launch";
   launch.textContent = "Plano de saque";
   const toolbar = document.createElement("div");
   toolbar.className = "launcher";
   toolbar.append(launch);
-  root.append(style, toolbar, dialog);
+  const markerLayer = document.createElement("div");
+  markerLayer.id = "map-layer";
+  markerLayer.setAttribute("aria-hidden","true");
+  root.append(style, toolbar, markerLayer, dialog);
   document.body.append(host);
   const message = content => { $("status").textContent = content; };
   function writeEditor(data) { $("json").value = JSON.stringify(data, null, 2); }
@@ -494,7 +529,11 @@
     const duration = Number($("duration").value);
     const nearby = readNearby();
     const ranking = storedRanking();
-    const data = {...state, targets:state.targets.map(target => {
+    const targets = new Map(state.targets.map(target => [target.coord,target]));
+    for (const [coord, village] of Object.entries(nearby?.villages ?? {})) {
+      if (village.distance <= nearby.radius && !targets.has(coord)) targets.set(coord,{coord,name:village.name});
+    }
+    const data = {...state, targets:[...targets.values()].map(target => {
       const entry = nearby?.villages?.[target.coord];
       if (!entry) return target;
       const owner = entry.owner !== "0" ? entry.owner : null;
@@ -551,20 +590,35 @@
   }
 
   const screen = new URLSearchParams(location.search).get("screen");
-  const nativePanel = $("native");
   const dispatched = new WeakSet();
+  function gameUrl(nextScreen, parameters = {}) {
+    const url = new URL("/game.php", location.href);
+    const current = new URLSearchParams(location.search);
+    for (const key of ["village","t"]) if (current.has(key)) url.searchParams.set(key, current.get(key));
+    for (const [key, value] of Object.entries({screen:nextScreen, ...parameters})) url.searchParams.set(key, value);
+    return url;
+  }
+
   function renderNative() {
     const list = $("native-list");
     list.replaceChildren();
     const farm = document.querySelector("#plunder_list, #plunder_list_table");
-    nativePanel.hidden = !farm;
-    if (!farm) return;
-    for (const row of farm.querySelectorAll("tr")) {
+    const map = readNearby();
+    const targets = new Map(Object.entries(map?.villages ?? {}).filter(([,v]) => v.owner === "0" && v.distance <= map.radius));
+    const nativeRows = new Map();
+    for (const row of farm?.querySelectorAll("tr") ?? []) {
       if (!row.getClientRects().length) continue;
       const coord = row.textContent.match(/\b\d{1,3}\|\d{1,3}\b/)?.[0];
+      if (coord && (!map || map.villages[coord]?.owner === "0")) nativeRows.set(coord, row);
+    }
+    for (const coord of nativeRows.keys()) if (!targets.has(coord)) targets.set(coord, {name:"Alvo do Assistente"});
+    const ordered = [...targets].sort(([a,av],[b,bv]) => Number(nativeRows.has(b)) - Number(nativeRows.has(a)) ||
+      (av.distance ?? Infinity) - (bv.distance ?? Infinity));
+    for (const [coord, target] of ordered) {
+      const row = nativeRows.get(coord);
       const buttons = [];
       for (const model of ["a","b"]) {
-        const native = row.querySelector(".farm_icon_" + model);
+        const native = row?.querySelector(".farm_icon_" + model);
         if (!native || !native.getClientRects().length || !native.closest("a,button")) continue;
         const control = native.closest("a,button");
         const button = document.createElement("button");
@@ -582,38 +636,48 @@
         };
         buttons.push(button);
       }
-      if (!coord || !buttons.length) continue;
-      const line = document.createElement("div");
-      line.className = "formrow";
-      const label = document.createElement("strong");
-      label.textContent = coord;
-      line.append(label, ...buttons);
-      list.append(line);
+      const line = list.insertRow();
+      const label = line.insertCell();
+      const title = document.createElement(target.id && game ? "a" : "strong");
+      title.textContent = (target.name || "Aldeia bárbara") + " (" + coord + ")";
+      if (target.id && game) title.href = String(gameUrl("info_village",{id:target.id}));
+      label.append(title);
+      line.insertCell().textContent = Number.isFinite(target.distance) ? target.distance.toFixed(1).replace(".",",") : "—";
+      const actions = line.insertCell();
+      if (buttons.length) actions.append(...buttons);
+      else actions.textContent = "Sem botão disponível";
     }
-    if (!list.children.length) list.textContent = "Nenhum botão A ou B disponível nesta página.";
+    $("open-farm").hidden = !!farm || !game;
+    $("open-farm").href = String(gameUrl("am_farm"));
+    $("farm-status").textContent = ordered.length
+      ? quantity(ordered.length,"aldeia na lista","aldeias na lista") + " · " + quantity(nativeRows.size,"visível no Assistente","visíveis no Assistente")
+      : "Clica em «Scan completo» para procurar aldeias bárbaras.";
   }
 
   const simplify = value => value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
   const dailyTitle = /recursos\s+(?:saqueados|pilhados)\s*\(?hoje/;
-  function rankingEntries() {
-    if (!demo && screen !== "ranking") return [];
-    const selectedDaily = [...document.querySelectorAll("h1,h2,h3,.selected,.active,option:checked")]
+  function rankingEntries(page = document, source = location.href) {
+    const sourceUrl = new URL(source, location.href);
+    const knownDaily = sourceUrl.searchParams.get("mode") === "in_a_day" && sourceUrl.searchParams.get("type") === "loot_res";
+    if (!demo && sourceUrl.searchParams.get("screen") !== "ranking") return [];
+    const selectedDaily = [...page.querySelectorAll("h1,h2,h3,.selected,.active,option:checked")]
       .some(node => dailyTitle.test(simplify(node.textContent.trim())) && node.textContent.trim().length < 100);
     const entries = new Map();
-    for (const table of document.querySelectorAll("table")) {
+    const tables = knownDaily ? page.querySelectorAll("#in_a_day_ranking_table") : page.querySelectorAll("table");
+    for (const table of tables) {
       const isDailyColumn = cell => {
         const label = simplify(cell.textContent);
         return cell.tagName === "TH" && (dailyTitle.test(label) || (selectedDaily && /^\s*(recursos|saque|pilhagem)/.test(label)));
       };
       const heading = [...table.rows].find(row => [...row.cells].some(isDailyColumn));
-      if (!heading || [...heading.cells].some(cell => cell.colSpan !== 1)) continue;
-      const index = [...heading.cells].findIndex(isDailyColumn);
+      if (!knownDaily && (!heading || [...heading.cells].some(cell => cell.colSpan !== 1))) continue;
+      const index = heading ? [...heading.cells].findIndex(isDailyColumn) : 3;
       for (const row of table.rows) {
         const link = row.querySelector('a[href*="screen=info_player"]');
         const cell = row.cells[index];
-        if (!link || !cell || !row.getClientRects().length || row.closest("table") !== table) continue;
-        const url = new URL(link.href, location.href);
-        const id = url.searchParams.get("id");
+        if (!link || !cell || (page === document && !row.getClientRects().length) || row.closest("table") !== table) continue;
+        const url = new URL(link.getAttribute("href"), sourceUrl);
+        const id = url.searchParams.get("id") ?? url.searchParams.get("player_id");
         const name = link.textContent.trim();
         const raw = cell.textContent.trim();
         if (url.origin !== location.origin || !/^\d+$/.test(id ?? "") || !name || !/^\d[\d.,\s]*$/.test(raw)) continue;
@@ -644,36 +708,92 @@
   }
 
   function mapBases() {
-    return [...new Set([window.game_data?.village?.coord, ...state.origins.map(origin => origin.coord)].filter(value => typeof value === "string" && coords.test(value)))];
+    const headerCoord = document.getElementById("header_info")?.textContent.match(/\b\d{1,3}\|\d{1,3}\b/)?.[0];
+    return [...new Set([window.game_data?.village?.coord ?? headerCoord, ...state.origins.map(origin => origin.coord)].filter(value => typeof value === "string" && coords.test(value)))];
   }
 
   async function refreshNearby() {
-    const button = $("refresh-map");
-    const status = $("map-status");
     const bases = mapBases();
-    if (!game || !bases.length) {
-      status.textContent = "Abre o jogo com uma aldeia selecionada ou configura origens no painel.";
-      return;
-    }
-    button.disabled = true;
-    status.textContent = "A ler o mapa do mundo…";
+    if (!bases.length) throw Error("Seleciona uma aldeia de origem.");
     const radius = Number($("radius").value);
     async function worldFile(name) {
       const response = await fetch("/map/" + name + ".txt", {credentials:"same-origin", signal:AbortSignal.timeout(12000)});
       if (!response.ok) throw Error("O mapa respondeu com HTTP " + response.status + ".");
       return response.text();
     }
-    try {
-      const [villages, players] = await Promise.all([worldFile("village"), worldFile("player")]);
-      const snapshot = mapNeighborhood(villages, players, bases, radius, self, readNearby(), Date.now());
-      localStorage.setItem(mapKey, JSON.stringify({...snapshot, worldDate:rankingDate()}));
-      renderRanking();
-      calculate();
-    } catch (error) {
-      status.textContent = "Mapa não atualizado. " + error.message;
-    } finally {
-      button.disabled = false;
+    const [villages, players] = await Promise.all([worldFile("village"), worldFile("player")]);
+    const snapshot = mapNeighborhood(villages, players, bases, radius, self, readNearby(), Date.now());
+    localStorage.setItem(mapKey, JSON.stringify({...snapshot, worldDate:rankingDate()}));
+    return snapshot;
+  }
+
+  function activitySignal(reading, changedAt, now = Date.now()) {
+    const latest = Math.max(reading?.increasedAt ?? 0, changedAt ?? 0);
+    if (latest > 0 && latest <= now && now - latest < 3 * 60 * minute) return {symbol:"●", detail:"Sinal observado nas últimas 3 horas"};
+    if (reading?.total > 0) return {symbol:"◇", detail:"Saque registado hoje"};
+    return {symbol:"?", detail:"Sem sinal recente"};
+  }
+
+  let markerFrame = 0;
+  const compact = new Intl.NumberFormat("pt-PT", {notation:"compact",maximumFractionDigits:1});
+  function queueMapMarkers() {
+    if (screen !== "map" || markerFrame) return;
+    markerFrame = requestAnimationFrame(() => {
+      markerFrame = 0;
+      const map = document.querySelector("#map_container, #map");
+      if (!map || !$("show-map").checked) {
+        markerLayer.replaceChildren();
+        return;
+      }
+      const snapshot = readNearby();
+      const history = storedRanking();
+      const date = rankingDate();
+      const byVillageId = new Map(Object.values(snapshot?.villages ?? {}).map(village => [village.id, village.owner]));
+      for (const village of Object.values(window.TWMap?.villages ?? {})) {
+        if (village?.id == null) continue;
+        const owner = String(village.owner ?? village.player_id ?? "");
+        if (/^\d+$/.test(owner)) byVillageId.set(String(village.id),owner);
+      }
+      const bounds = map.getBoundingClientRect();
+      const marks = document.createDocumentFragment();
+      for (const icon of map.querySelectorAll('[id^="map_village_"]')) {
+        const owner = byVillageId.get(icon.id.slice("map_village_".length));
+        if (!owner || owner === "0" || owner === self) continue;
+        const rect = icon.getBoundingClientRect();
+        const x = rect.left + rect.width / 2;
+        const y = rect.top;
+        if (!rect.width || x < Math.max(0,bounds.left) || x > Math.min(innerWidth,bounds.right) ||
+            y < Math.max(0,bounds.top) || y > Math.min(innerHeight,bounds.bottom)) continue;
+        const reading = history[owner]?.days?.[date];
+        const signal = activitySignal(reading,snapshot?.players?.[owner]?.changedAt);
+        const marker = document.createElement("span");
+        marker.className = "village-mark" + (signal.symbol === "●" ? " recent" : "");
+        marker.style.left = x + "px";
+        marker.style.top = y + "px";
+        marker.textContent = signal.symbol + " " + (reading ? compact.format(reading.total) : "—");
+        marks.append(marker);
+      }
+      markerLayer.replaceChildren(marks);
+    });
+  }
+
+  function startMapMarkers() {
+    $("map-option").hidden = screen !== "map";
+    if (screen !== "map") return;
+    $("show-map").checked = localStorage.getItem(mapKey + ":markers") !== "off";
+    $("show-map").onchange = () => {
+      localStorage.setItem(mapKey + ":markers", $("show-map").checked ? "on" : "off");
+      queueMapMarkers();
+    };
+    const map = document.querySelector("#map_container, #map");
+    if (map) {
+      new MutationObserver(queueMapMarkers).observe(map,{subtree:true,childList:true,attributes:true,attributeFilter:["style","class"]});
+      map.addEventListener("pointermove", event => { if (event.buttons) queueMapMarkers(); }, {passive:true});
     }
+    window.addEventListener("resize",queueMapMarkers);
+    window.addEventListener("scroll",queueMapMarkers,{passive:true,capture:true});
+    window.addEventListener("storage",queueMapMarkers);
+    queueMapMarkers();
   }
 
   function renderRanking() {
@@ -687,7 +807,7 @@
     const neighbors = nearby?.players ?? {};
     const owners = new Set(state.targets.map(target => target.player).filter(Boolean));
     $("map-status").textContent = nearby
-      ? Object.keys(neighbors).length + " vizinhos num raio de " + nearby.radius + " campos · mapa consultado em " + dayKey(nearby.at, state.zone ?? "Europe/Lisbon")
+      ? quantity(Object.keys(neighbors).length,"vizinho","vizinhos") + " num raio de " + nearby.radius + " campos · mapa consultado em " + dayKey(nearby.at, state.zone ?? "Europe/Lisbon")
       : "Atualiza o mapa para identificar os vizinhos por distância.";
     const allIds = new Set([...Object.keys(history), ...Object.keys(neighbors)]);
     allIds.delete(self);
@@ -725,8 +845,8 @@
         todayCell.append(observed);
       }
       row.insertCell().textContent = previous ? previous + " · " + format.format(player.days[previous].total) : "Sem dados";
-      const zone = state.zone ?? "Europe/Lisbon";
-      row.insertCell().textContent = neighbor?.changedAt ? dayKey(neighbor.changedAt, zone) + " " + clock(neighbor.changedAt, zone) : "Sem mudança observada";
+      const signal = activitySignal(reading, neighbor?.changedAt);
+      row.insertCell().textContent = signal.symbol + " " + signal.detail;
       const cell = row.insertCell();
       const toggle = document.createElement("input");
       toggle.type = "checkbox";
@@ -745,25 +865,68 @@
     }
   }
 
-  function captureRanking() {
-    const entries = rankingEntries();
-    if (!entries.length) {
-      rankStatus("Não reconheci a tabela diária. Abre «Recursos saqueados hoje» e verifica se os valores estão visíveis.");
-      return;
+  async function captureRanking(date) {
+    const entries = new Map(rankingEntries().map(entry => [entry.id, entry]));
+    if (!demo) {
+      let url = gameUrl("ranking", {mode:"in_a_day", type:"loot_res"});
+      const visited = new Set();
+      for (let pageNo = 0; url && pageNo < 6; pageNo++) {
+        visited.add(String(url));
+        const response = await fetch(url, {credentials:"same-origin", signal:AbortSignal.timeout(10000)});
+        if (!response.ok) {
+          if (entries.size) break;
+          throw Error("Classificação indisponível (HTTP " + response.status + ").");
+        }
+        const page = new DOMParser().parseFromString(await response.text(), "text/html");
+        for (const entry of rankingEntries(page, response.url)) entries.set(entry.id, entry);
+        const pageIndex = link => Number(link.searchParams.get("page") ?? link.searchParams.get("offset") ?? 0);
+        const next = [...page.querySelectorAll('a[href*="in_a_day"]')].map(link => new URL(link.getAttribute("href"), url))
+          .filter(link => link.origin === location.origin && link.searchParams.get("screen") === "ranking" &&
+            link.searchParams.get("mode") === "in_a_day" && link.searchParams.get("type") === "loot_res" &&
+            pageIndex(link) > pageIndex(url) && !visited.has(String(link)))
+          .sort((a,b) => pageIndex(a) - pageIndex(b))[0];
+        url = next;
+      }
     }
+    if (!entries.size) throw Error("Nenhum total diário reconhecido na classificação.");
+    if (date !== rankingDate()) throw Error("Mudou o dia no servidor. Repete o scan.");
+    saveRanking(mergeRanking(readRanking(), [...entries.values()], date, Date.now()));
+    return entries.size;
+  }
+
+  function selectView(name) {
+    root.querySelectorAll("[data-pane]").forEach(pane => { pane.hidden = pane.dataset.pane !== name; });
+    root.querySelectorAll("[data-view]").forEach(button => button.setAttribute("aria-pressed", String(button.dataset.view === name)));
+  }
+
+  async function scanAll() {
+    const button = $("scan");
+    if (button.disabled) return;
+    button.disabled = true;
+    $("radius").disabled = true;
+    $("scan-status").textContent = "A ler aldeias e classificação…";
+    const date = rankingDate();
     try {
-      const date = rankingDate();
-      saveRanking(mergeRanking(readRanking(), entries, date, Date.now()));
-      rankStatus(entries.length + (entries.length === 1 ? " jogador guardado" : " jogadores guardados") + " para " + date + ".");
+      const [map, ranking] = await Promise.allSettled([game ? refreshNearby() : Promise.resolve(readNearby()), captureRanking(date)]);
+      if (ranking.status === "fulfilled") rankStatus(quantity(ranking.value,"jogador lido","jogadores lidos") + " na classificação · " + date);
+      else rankStatus(ranking.reason.message);
+      renderNative();
       renderRanking();
       calculate();
-      if (game && mapBases().length && readNearby()?.worldDate !== date && !$("refresh-map").disabled) {
-        void refreshNearby();
-      }
-    } catch { rankStatus("Não foi possível guardar a classificação no navegador."); }
+      queueMapMarkers();
+      const details = [];
+      if (map.status === "fulfilled" && map.value) details.push(quantity(Object.keys(map.value.players).length,"vizinho","vizinhos"));
+      if (ranking.status === "fulfilled") details.push(quantity(ranking.value,"total diário","totais diários"));
+      if (map.status === "rejected") details.push("Mapa: " + map.reason.message);
+      if (ranking.status === "rejected") details.push("Classificação: " + ranking.reason.message);
+      $("scan-status").textContent = details.join(" · ");
+    } finally {
+      button.disabled = false;
+      $("radius").disabled = false;
+    }
   }
-  $("scan").onclick = captureRanking;
-  $("refresh-map").onclick = refreshNearby;
+  $("scan").onclick = scanAll;
+  root.querySelectorAll("[data-view]").forEach(button => button.onclick = () => selectView(button.dataset.view));
   $("tracked-only").onchange = renderRanking;
   $("export-ranking").onclick = () => {
     try { downloadJson("historico-diario-de-saque.json", readRanking()); }
@@ -777,7 +940,6 @@
     sort = column;
     renderPlan();
   }));
-  $("data").onclick = () => { $("inputs").open = true; $("inputs").scrollIntoView({block:"nearest"}); $("json").focus(); };
   $("close").onclick = () => dialog.close();
   $("capture").hidden = demo;
   $("capture").onclick = captureTargets;
@@ -816,21 +978,9 @@
   calculate();
   renderNative();
   renderRanking();
-  if (game && rankingEntries().length) {
-    const captureToday = document.createElement("button");
-    captureToday.className = "launch";
-    captureToday.textContent = "Guardar saque de hoje";
-    captureToday.onclick = () => {
-      captureRanking();
-      $("daily").open = true;
-      dialog.showModal();
-      $("daily").scrollIntoView({block:"start"});
-    };
-    toolbar.prepend(captureToday);
-  }
-  nativePanel.open = !nativePanel.hidden;
-  $("daily").open = screen === "ranking";
-  dialog.showModal();
+  startMapMarkers();
+  selectView(screen === "ranking" || screen === "map" ? "neighbors" : "farm");
+  if (screen !== "map" || !readNearby()) dialog.showModal();
 })();
 
 
